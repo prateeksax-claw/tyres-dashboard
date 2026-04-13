@@ -53,9 +53,9 @@ export function SalesmenPage() {
   });
 
   const salesmen = data?.salesmen || [];
-  const totalRev = salesmen.reduce((s: number, sm: any) => s + (sm.revenue || 0), 0);
-  const totalCustomers = salesmen.reduce((s: number, sm: any) => s + (sm.unique_customers || sm.customers || 0), 0);
-  const maxRev = Math.max(...salesmen.map((s: any) => s.revenue || 0), 1);
+  const totalRev = salesmen.reduce((s: number, sm: any) => s + (sm.Revenue || sm.revenue || 0), 0);
+  const totalCustomers = salesmen.reduce((s: number, sm: any) => s + (sm.Customers || sm.unique_customers || sm.customers || 0), 0);
+  const maxRev = Math.max(...salesmen.map((s: any) => s.Revenue || s.revenue || 0), 1);
   const avgRevPerSM = salesmen.length > 0 ? totalRev / salesmen.length : 0;
 
   const smPerf = smDetail?.performance || {};
@@ -89,7 +89,7 @@ export function SalesmenPage() {
         <KpiCard title="Total Salesmen" formattedValue={String(salesmen.length)} value={salesmen.length} accentColor="teal" icon={<Users />} />
         <KpiCard title="Total Revenue" formattedValue={`AED ${formatCurrency(totalRev)}`} value={totalRev} numericValue={totalRev} animate accentColor="emerald" icon={<DollarSign />} />
         <KpiCard title="Avg per Salesman" formattedValue={`AED ${formatCurrency(avgRevPerSM, true)}`} value={avgRevPerSM} accentColor="amber" icon={<Target />} />
-        <KpiCard title="Top Performer" formattedValue={salesmen[0]?.salesman || '—'} value={salesmen[0]?.salesman || '—'} subtitle={salesmen[0] ? `AED ${formatCurrency(salesmen[0].revenue || 0, true)}` : undefined} accentColor="sky" icon={<TrendingUp />} />
+        <KpiCard title="Top Performer" formattedValue={salesmen[0]?.SalesMan || salesmen[0]?.salesman || '—'} value={salesmen[0]?.SalesMan || salesmen[0]?.salesman || '—'} subtitle={salesmen[0] ? `AED ${formatCurrency(salesmen[0].Revenue || salesmen[0].revenue || 0, true)}` : undefined} accentColor="sky" icon={<TrendingUp />} />
       </div>
 
       <Card title="Salesman Ranking" subtitle="Click to expand details" actions={
@@ -102,12 +102,13 @@ export function SalesmenPage() {
       }>
         <div className="space-y-1">
           {salesmen.map((sm: any, i: number) => {
-            const isExpanded = expandedSM === sm.salesman;
-            const pct = Math.max((sm.revenue || 0) / maxRev * 100, 0);
+            const isExpanded = expandedSM === (sm.SalesMan || sm.salesman);
+            const smRev = sm.Revenue || sm.revenue || 0;
+            const pct = Math.max(smRev / maxRev * 100, 0);
             return (
               <div key={i}>
                 <button
-                  onClick={() => setExpandedSM(isExpanded ? null : sm.salesman)}
+                  onClick={() => setExpandedSM(isExpanded ? null : (sm.SalesMan || sm.salesman))}
                   className={cn('w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-all',
                     isExpanded ? 'bg-teal-50/80 border border-teal-200/60' : 'hover:bg-gray-50/60'
                   )}
@@ -115,15 +116,17 @@ export function SalesmenPage() {
                   <span className="font-mono text-[10px] text-gray-400 font-bold w-5">{i + 1}</span>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between mb-1">
-                      <span className="text-[12px] font-semibold text-gray-700 truncate">{sm.salesman}</span>
-                      <span className="font-mono text-[12px] text-gray-700 font-medium ml-2">AED {formatCurrency(sm.revenue || 0, true)}</span>
+                      <span className="text-[12px] font-semibold text-gray-700 truncate">{sm.SalesMan || sm.salesman}</span>
+                      <span className="font-mono text-[12px] text-gray-700 font-medium ml-2">AED {formatCurrency(sm.Revenue || sm.revenue || 0, true)}</span>
                     </div>
                     <div className="h-[4px] bg-gray-100 rounded-full overflow-hidden">
                       <div className="h-full rounded-full" style={{ width: `${pct}%`, background: 'linear-gradient(90deg, #0d9488, #14b8a6)' }} />
                     </div>
                     <div className="flex items-center gap-3 mt-1 text-[10px] text-gray-400">
-                      <span className={gpColor(sm.gp_pct || 0)}>GP: {formatPct(sm.gp_pct)}</span>
-                      <span>{sm.unique_customers || sm.customers || 0} customers</span>
+                      <span className={gpColor(sm.gp_pct || sm.GP_Pct || 0)}>GP: {formatPct(sm.gp_pct || sm.GP_Pct)}</span>
+                      <span>{sm.unique_customers || sm.Customers || sm.customers || 0} customers</span>
+                      {(sm.Units || sm.units) ? <span>{(sm.Units || sm.units || 0).toLocaleString()} units</span> : null}
+                      {(sm.Invoices || sm.invoices) ? <span>{(sm.Invoices || sm.invoices || 0)} invoices</span> : null}
                     </div>
                   </div>
                   {isExpanded ? <ChevronDown className="w-4 h-4 text-teal-500 shrink-0" /> : <ChevronRight className="w-4 h-4 text-gray-400 shrink-0" />}

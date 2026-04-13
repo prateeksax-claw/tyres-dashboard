@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 import duckdb as _duckdb
@@ -49,7 +50,6 @@ def _get_duckdb_con():
     if _duckdb_con is not None and current_mtime == _duckdb_mtime:
         return _duckdb_con
 
-    # Close old connection if DB was updated (nightly sync)
     if _duckdb_con is not None:
         try:
             _duckdb_con.close()
@@ -128,6 +128,16 @@ def _default_month():
     return f"{now.year}-{now.month:02d}"
 
 
+def _prev_month(month: str):
+    """Return the month before the given month as 'YYYY-MM'."""
+    y, m = int(month[:4]), int(month[5:7])
+    m -= 1
+    if m <= 0:
+        m += 12
+        y -= 1
+    return f"{y}-{m:02d}"
+
+
 def _month_bounds(month: str):
     """Returns (month_start, month_end) as 'YYYY-MM-DD' strings."""
     y, m = int(month[:4]), int(month[5:7])
@@ -155,17 +165,22 @@ def _months_available(count=12):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Tyres Dashboard starting...")
-    _get_duckdb_con()  # pre-warm connection
+    _get_duckdb_con()
     yield
     logger.info("Tyres Dashboard stopped.")
 
 app = FastAPI(title="Tyres Dashboard API", lifespan=lifespan)
 
+app.add_middleware(GZipMiddleware, minimum_size=500)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=[
+        "https://tyres.prateeksaxena.net",
+        "http://localhost:3202",
+        "http://127.0.0.1:3202",
+    ],
+    allow_credentials=False,
+    allow_methods=["GET"],
     allow_headers=["*"],
 )
 
@@ -173,13 +188,26 @@ app.add_middleware(
 # ── Health ────────────────────────────────────────────────────────────────────
 @app.get("/api/health")
 def health():
-    db_ok = TYRES_DB.exists()
-    return {
-        "status": "ok" if db_ok else "degraded",
-        "tyres_db": str(TYRES_DB),
-        "tyres_db_exists": db_ok,
-        "tyres_db_size_mb": round(TYRES_DB.stat().st_size / 1048576, 1) if db_ok else 0,
-    }
+    try:
+        db_ok = TYRES_DB.exists()
+        size_mb = round(TYRES_DB.stat().st_size / 1048576, 1) if db_ok else 0
+        # Test actual DB connectivity
+        query_ok = False
+        if db_ok:
+            try:
+                rows, _ = _query("SELECT COUNT(*) FROM tyres.sales LIMIT 1")
+                query_ok = rows[0][0] > 0 if rows else False
+            except Exception:
+                pass
+        return {
+            "status": "ok" if (db_ok and query_ok) else "degraded",
+            "tyres_db": str(TYRES_DB),
+            "tyres_db_exists": db_ok,
+            "tyres_db_size_mb": size_mb,
+            "query_ok": query_ok,
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -187,10 +215,12 @@ def health():
 # ══════════════════════════════════════════════════════════════════════════════
 @app.get("/api/tyres/summary")
 def tyres_summary(month: Optional[str] = None):
-    """MTD salesman performance + monthly trend from tyres-mirror.db via DuckDB."""
+    """MTD performance from tyres-mirror.db via DuckDB."""
     try:
         month = month or _default_month()
         month_start, month_end = _month_bounds(month)
+        prev_m = _prev_month(month)
+        prev_start, prev_end = _month_bounds(prev_m)
 
         # ── Salesmen MTD ──────────────────────────────────────────────
         rows_sm, _ = _query(f"""
@@ -200,7 +230,9 @@ def tyres_summary(month: Optional[str] = None):
                        THEN NetAmountWithoutVAT - (LastPurchaseRate * Quantity)
                        ELSE 0 END)) as margin,
                    COUNT(DISTINCT Customer) as customers,
-                   COUNT(DISTINCT CAST(InvoiceDate AS DATE)) as active_days
+                   COUNT(DISTINCT CAST(InvoiceDate AS DATE)) as active_days,
+                   ROUND(SUM(Quantity)) as units,
+                   COUNT(*) as invoice_lines
             FROM tyres.sales
             WHERE {TYRES_WHERE}
               AND InvoiceDate >= ? AND InvoiceDate < ?
@@ -212,6 +244,7 @@ def tyres_summary(month: Optional[str] = None):
         for r in rows_sm:
             rev = r[1] or 0
             margin = r[2] or 0
+            units = r[5] or 0
             salesmen.append({
                 "SalesMan": r[0],
                 "Revenue": round(rev),
@@ -219,56 +252,93 @@ def tyres_summary(month: Optional[str] = None):
                 "GP_Pct": round(margin / rev * 100, 1) if rev > 0 else 0,
                 "Customers": r[3] or 0,
                 "ActiveDays": r[4] or 0,
+                "Units": round(units),
+                "Invoices": r[6] or 0,
             })
 
-        # ── Monthly trend (last 6 months) ─────────────────────────────
+        # ── Previous month totals (for MoM comparison) ────────────────
+        rows_prev, _ = _query(f"""
+            SELECT ROUND(SUM(NetAmountWithoutVAT)) as revenue,
+                   ROUND(SUM(CASE WHEN LastPurchaseRate > 0
+                       THEN NetAmountWithoutVAT - (LastPurchaseRate * Quantity)
+                       ELSE 0 END)) as margin,
+                   COUNT(DISTINCT Customer) as customers,
+                   ROUND(SUM(Quantity)) as units,
+                   COUNT(*) as invoices
+            FROM tyres.sales
+            WHERE {TYRES_WHERE}
+              AND InvoiceDate >= ? AND InvoiceDate < ?
+        """, [prev_start, prev_end])
+        prev = rows_prev[0] if rows_prev else (0, 0, 0, 0, 0)
+        prev_rev = prev[0] or 0
+        prev_margin = prev[1] or 0
+        prev_customers = prev[2] or 0
+        prev_units = prev[3] or 0
+        prev_invoices = prev[4] or 0
+        prev_gp = (prev_margin / prev_rev * 100) if prev_rev > 0 else 0
+
+        # ── Monthly trend (last 12 months) ────────────────────────────
         rows_trend, _ = _query(f"""
             SELECT STRFTIME(CAST(InvoiceDate AS DATE), '%Y-%m') as month,
                    ROUND(SUM(NetAmountWithoutVAT)) as revenue,
                    ROUND(SUM(CASE WHEN LastPurchaseRate > 0
                        THEN NetAmountWithoutVAT - (LastPurchaseRate * Quantity)
-                       ELSE 0 END)) as margin
+                       ELSE 0 END)) as margin,
+                   ROUND(SUM(Quantity)) as units,
+                   COUNT(DISTINCT Customer) as customers
             FROM tyres.sales
             WHERE {TYRES_WHERE}
-              AND InvoiceDate >= STRFTIME(CURRENT_DATE - INTERVAL '6 months', '%Y-%m-%d')
+              AND InvoiceDate >= STRFTIME(CURRENT_DATE - INTERVAL '12 months', '%Y-%m-%d')
             GROUP BY month ORDER BY month
         """)
-        trend = [{"month": r[0], "revenue": round(r[1] or 0), "margin": round(r[2] or 0)} for r in rows_trend]
+        trend = [{
+            "month": r[0], "revenue": round(r[1] or 0), "margin": round(r[2] or 0),
+            "units": round(r[3] or 0), "customers": r[4] or 0,
+        } for r in rows_trend]
 
         # ── Daily breakdown for current month ─────────────────────────
         rows_daily, _ = _query(f"""
             SELECT CAST(InvoiceDate AS DATE) as day,
                    ROUND(SUM(NetAmountWithoutVAT)) as revenue,
                    COUNT(DISTINCT Customer) as customers,
-                   COUNT(DISTINCT SalesMan) as salesmen
+                   COUNT(DISTINCT SalesMan) as salesmen,
+                   ROUND(SUM(Quantity)) as units,
+                   COUNT(*) as invoices
             FROM tyres.sales
             WHERE {TYRES_WHERE}
               AND InvoiceDate >= ? AND InvoiceDate < ?
             GROUP BY day ORDER BY day
         """, [month_start, month_end])
-        daily_chart = [{"date": str(r[0]), "revenue": round(r[1] or 0), "customers": r[2] or 0} for r in rows_daily]
+        daily_chart = [{
+            "date": str(r[0]), "revenue": round(r[1] or 0), "customers": r[2] or 0,
+            "units": round(r[4] or 0), "invoices": r[5] or 0,
+        } for r in rows_daily]
 
-        # ── Brands ────────────────────────────────────────────────────
-        rows_brands, _ = _query(f"""
-            SELECT COALESCE(Branch, 'Unknown') as brand,
+        # ── Branches (location) ───────────────────────────────────────
+        rows_branches, _ = _query(f"""
+            SELECT COALESCE(Branch, 'Unknown') as branch,
                    ROUND(SUM(NetAmountWithoutVAT)) as revenue,
                    ROUND(SUM(CASE WHEN LastPurchaseRate > 0
                        THEN NetAmountWithoutVAT - (LastPurchaseRate * Quantity)
-                       ELSE 0 END)) as margin
+                       ELSE 0 END)) as margin,
+                   ROUND(SUM(Quantity)) as units,
+                   COUNT(DISTINCT Customer) as customers
             FROM tyres.sales
             WHERE {TYRES_WHERE}
               AND InvoiceDate >= ? AND InvoiceDate < ?
-            GROUP BY brand
+            GROUP BY branch
             ORDER BY revenue DESC
         """, [month_start, month_end])
-        brands = []
-        for r in rows_brands:
+        branches = []
+        for r in rows_branches:
             rev = r[1] or 0
             margin = r[2] or 0
-            brands.append({
-                "brand": r[0],
+            branches.append({
+                "branch": r[0],
                 "revenue": round(rev),
                 "gp_pct": round(margin / rev * 100, 1) if rev > 0 else 0,
+                "units": round(r[3] or 0),
+                "customers": r[4] or 0,
             })
 
         # ── Customers ─────────────────────────────────────────────────
@@ -278,13 +348,15 @@ def tyres_summary(month: Optional[str] = None):
                    ROUND(SUM(CASE WHEN LastPurchaseRate > 0
                        THEN NetAmountWithoutVAT - (LastPurchaseRate * Quantity)
                        ELSE 0 END)) as margin,
-                   COUNT(*) as invoices
+                   COUNT(*) as invoices,
+                   ROUND(SUM(Quantity)) as units,
+                   MAX(SalesMan) as salesman
             FROM tyres.sales
             WHERE {TYRES_WHERE}
               AND InvoiceDate >= ? AND InvoiceDate < ?
             GROUP BY Customer
             ORDER BY revenue DESC
-            LIMIT 50
+            LIMIT 100
         """, [month_start, month_end])
         customers = []
         for r in rows_cust:
@@ -295,6 +367,38 @@ def tyres_summary(month: Optional[str] = None):
                 "revenue": round(rev),
                 "gp_pct": round(margin / rev * 100, 1) if rev > 0 else 0,
                 "invoices": r[3] or 0,
+                "units": round(r[4] or 0),
+                "salesman": r[5] or "",
+            })
+
+        # ── Products (top items by revenue) ───────────────────────────
+        rows_prod, _ = _query(f"""
+            SELECT COALESCE(ItemName, 'Unknown') as product,
+                   COALESCE(Branch, '') as branch,
+                   ROUND(SUM(NetAmountWithoutVAT)) as revenue,
+                   ROUND(SUM(CASE WHEN LastPurchaseRate > 0
+                       THEN NetAmountWithoutVAT - (LastPurchaseRate * Quantity)
+                       ELSE 0 END)) as margin,
+                   ROUND(SUM(Quantity)) as units,
+                   COUNT(DISTINCT Customer) as customers
+            FROM tyres.sales
+            WHERE {TYRES_WHERE}
+              AND InvoiceDate >= ? AND InvoiceDate < ?
+            GROUP BY product, branch
+            ORDER BY revenue DESC
+            LIMIT 50
+        """, [month_start, month_end])
+        products = []
+        for r in rows_prod:
+            rev = r[2] or 0
+            margin = r[3] or 0
+            products.append({
+                "product": r[0],
+                "branch": r[1],
+                "revenue": round(rev),
+                "gp_pct": round(margin / rev * 100, 1) if rev > 0 else 0,
+                "units": round(r[4] or 0),
+                "customers": r[5] or 0,
             })
 
         # ── Totals ────────────────────────────────────────────────────
@@ -302,12 +406,26 @@ def tyres_summary(month: Optional[str] = None):
         total_margin = sum(s["Margin"] for s in salesmen)
         total_gp = (total_margin / total_rev * 100) if total_rev > 0 else 0
         total_customers = sum(s["Customers"] for s in salesmen)
+        total_units = sum(s["Units"] for s in salesmen)
+        total_invoices = sum(s["Invoices"] for s in salesmen)
+        avg_price = (total_rev / total_units) if total_units > 0 else 0
 
         y, m = int(month[:4]), int(month[5:7])
         days_in_month = monthrange(y, m)[1]
         today = datetime.now()
         days_elapsed = min(today.day, days_in_month) if today.year == y and today.month == m else days_in_month
         projected = (total_rev / days_elapsed * days_in_month) if days_elapsed > 0 else 0
+
+        # ── MoM changes ──────────────────────────────────────────────
+        def _mom_pct(current, previous):
+            if previous and previous > 0:
+                return round((current - previous) / previous * 100, 1)
+            return None
+
+        mom_revenue = _mom_pct(total_rev, prev_rev)
+        mom_gp = round(total_gp - prev_gp, 1) if prev_rev > 0 else None
+        mom_customers = _mom_pct(total_customers, prev_customers)
+        mom_units = _mom_pct(total_units, prev_units)
 
         return {
             "salesmen": salesmen,
@@ -317,18 +435,29 @@ def tyres_summary(month: Optional[str] = None):
             "monthly_target": MONTHLY_TARGET,
             "monthly_trend": trend,
             "daily_chart": daily_chart,
-            "top_brands": brands[:10],
+            "branches": branches,
             "customers": customers,
+            "products": products,
             "kpis": {
                 "revenue": round(total_rev),
                 "gp_pct": round(total_gp, 1),
                 "projected_revenue": round(projected),
-                "units_sold": 0,
-                "avg_selling_price": 0,
+                "units_sold": round(total_units),
+                "avg_selling_price": round(avg_price),
                 "days_elapsed": days_elapsed,
                 "days_in_month": days_in_month,
                 "customers": total_customers,
-                "invoices": 0,
+                "invoices": total_invoices,
+                "target": MONTHLY_TARGET,
+                "achievement_pct": round(total_rev / MONTHLY_TARGET * 100, 1) if MONTHLY_TARGET > 0 else 0,
+            },
+            "mom": {
+                "revenue_pct": mom_revenue,
+                "gp_change": mom_gp,
+                "customers_pct": mom_customers,
+                "units_pct": mom_units,
+                "prev_revenue": round(prev_rev),
+                "prev_gp_pct": round(prev_gp, 1),
             },
             "months_available": _months_available(),
             "month": month,
@@ -340,13 +469,11 @@ def tyres_summary(month: Optional[str] = None):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# OVERVIEW — richer endpoint for the React dashboard
+# OVERVIEW — wraps tyres_summary (cached)
 # ══════════════════════════════════════════════════════════════════════════════
 @app.get("/api/overview")
 def overview(month: Optional[str] = None):
-    """Full overview — wraps tyres_summary with extra KPI shaping."""
-    data = cached(f"summary_{month or _default_month()}", lambda: tyres_summary(month))
-    return data
+    return cached(f"summary_{month or _default_month()}", lambda: tyres_summary(month))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -362,19 +489,18 @@ def salesmen_list(month: Optional[str] = None):
 def salesman_detail(name: str, months: int = Query(default=6)):
     """Salesman drill-down: trend + customer breakdown."""
     try:
-        # Monthly trend for this salesman
         rows, _ = _query(f"""
             SELECT STRFTIME(CAST(InvoiceDate AS DATE), '%Y-%m') as month,
-                   ROUND(SUM(NetAmountWithoutVAT)) as revenue
+                   ROUND(SUM(NetAmountWithoutVAT)) as revenue,
+                   ROUND(SUM(Quantity)) as units
             FROM tyres.sales
             WHERE {TYRES_WHERE}
               AND SalesMan = ?
               AND InvoiceDate >= STRFTIME(CURRENT_DATE - INTERVAL '{months} months', '%Y-%m-%d')
             GROUP BY month ORDER BY month
         """, [name])
-        trend_months = [{"month": r[0], "revenue": round(r[1] or 0)} for r in rows]
+        trend_months = [{"month": r[0], "revenue": round(r[1] or 0), "units": round(r[2] or 0)} for r in rows]
 
-        # Top customers for this salesman (current month)
         month = _default_month()
         ms, me = _month_bounds(month)
         rows_c, _ = _query(f"""
@@ -382,7 +508,9 @@ def salesman_detail(name: str, months: int = Query(default=6)):
                    ROUND(SUM(NetAmountWithoutVAT)) as revenue,
                    ROUND(SUM(CASE WHEN LastPurchaseRate > 0
                        THEN NetAmountWithoutVAT - (LastPurchaseRate * Quantity)
-                       ELSE 0 END)) as margin
+                       ELSE 0 END)) as margin,
+                   ROUND(SUM(Quantity)) as units,
+                   COUNT(*) as invoices
             FROM tyres.sales
             WHERE {TYRES_WHERE}
               AND SalesMan = ?
@@ -398,18 +526,18 @@ def salesman_detail(name: str, months: int = Query(default=6)):
                 "customer": r[0],
                 "revenue": round(rev),
                 "gp_pct": round(margin / rev * 100, 1) if rev > 0 else 0,
+                "units": round(r[3] or 0),
+                "invoices": r[4] or 0,
             })
 
         return {
-            "performance": {},
             "customers": {"customers": customers},
-            "categories": {},
             "trend": {"salesmen": [{"name": name, "months": trend_months}]},
             "month": month,
         }
     except Exception as e:
         logger.error(f"Salesman detail error: {e}")
-        return {"performance": {}, "customers": {"customers": []}, "trend": {"salesmen": []}}
+        return {"customers": {"customers": []}, "trend": {"salesmen": []}}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -428,23 +556,51 @@ def customers_list(month: Optional[str] = None, search: Optional[str] = None, li
 def customer_detail(name: str, month: Optional[str] = None):
     """Customer drill-down: trend + product breakdown."""
     month = month or _default_month()
+    ms, me = _month_bounds(month)
     try:
-        # Monthly trend for this customer
+        # Monthly trend
         rows, _ = _query(f"""
             SELECT STRFTIME(CAST(InvoiceDate AS DATE), '%Y-%m') as month,
                    ROUND(SUM(NetAmountWithoutVAT)) as revenue,
                    ROUND(SUM(CASE WHEN LastPurchaseRate > 0
                        THEN NetAmountWithoutVAT - (LastPurchaseRate * Quantity)
-                       ELSE 0 END)) as margin
+                       ELSE 0 END)) as margin,
+                   ROUND(SUM(Quantity)) as units
             FROM tyres.sales
             WHERE {TYRES_WHERE}
               AND Customer = ?
               AND InvoiceDate >= STRFTIME(CURRENT_DATE - INTERVAL '6 months', '%Y-%m-%d')
             GROUP BY month ORDER BY month
         """, [name])
-        trend = [{"month": r[0], "revenue": round(r[1] or 0), "gp_pct": round((r[2] or 0) / (r[1] or 1) * 100, 1)} for r in rows]
+        trend = [{"month": r[0], "revenue": round(r[1] or 0), "gp_pct": round((r[2] or 0) / max(r[1] or 1, 1) * 100, 1), "units": round(r[3] or 0)} for r in rows]
 
-        return {"customer": name, "products": [], "trend": trend, "month": month}
+        # Products bought by this customer
+        rows_p, _ = _query(f"""
+            SELECT COALESCE(ItemName, 'Unknown') as product,
+                   ROUND(SUM(NetAmountWithoutVAT)) as revenue,
+                   ROUND(SUM(CASE WHEN LastPurchaseRate > 0
+                       THEN NetAmountWithoutVAT - (LastPurchaseRate * Quantity)
+                       ELSE 0 END)) as margin,
+                   ROUND(SUM(Quantity)) as units
+            FROM tyres.sales
+            WHERE {TYRES_WHERE}
+              AND Customer = ?
+              AND InvoiceDate >= ? AND InvoiceDate < ?
+            GROUP BY product
+            ORDER BY revenue DESC LIMIT 20
+        """, [name, ms, me])
+        products = []
+        for r in rows_p:
+            rev = r[1] or 0
+            margin = r[2] or 0
+            products.append({
+                "product": r[0],
+                "revenue": round(rev),
+                "gp_pct": round(margin / max(rev, 1) * 100, 1),
+                "units": round(r[3] or 0),
+            })
+
+        return {"customer": name, "products": products, "trend": trend, "month": month}
     except Exception as e:
         logger.error(f"Customer detail error: {e}")
         return {"customer": name, "products": [], "trend": [], "month": month}
@@ -457,9 +613,9 @@ def customer_detail(name: str, month: Optional[str] = None):
 def products_list(month: Optional[str] = None):
     data = cached(f"summary_{month or _default_month()}", lambda: tyres_summary(month))
     return {
-        "categories": [],
-        "products": [],
-        "brands": data.get("top_brands", []),
+        "products": data.get("products", []),
+        "branches": data.get("branches", []),
+        "total_product_count": len(data.get("products", [])),
         "month": month or _default_month(),
     }
 
