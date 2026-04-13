@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Search, LayoutDashboard, Package, Users, UserCircle, Warehouse, X } from 'lucide-react';
+import { Search, LayoutDashboard, Package, Users, UserCircle, X } from 'lucide-react';
 import { cn } from '../lib/utils';
 
 const PAGES = [
@@ -9,7 +9,6 @@ const PAGES = [
   { path: '/products', label: 'Products & Brands', icon: Package, keywords: 'products tyres brands categories' },
   { path: '/salesmen', label: 'Salesmen', icon: Users, keywords: 'salesmen team performance' },
   { path: '/customers', label: 'Customers', icon: UserCircle, keywords: 'customers accounts clients' },
-  { path: '/inventory', label: 'Inventory', icon: Warehouse, keywords: 'inventory stock warehouse orders' },
 ];
 
 export function CommandPalette() {

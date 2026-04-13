@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  LayoutDashboard, Users, UserCircle, Package, Warehouse,
+  LayoutDashboard, Users, UserCircle, Package,
   ChevronLeft, ChevronRight, CircleDot, Sun, Moon, Menu, X,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
@@ -13,7 +13,6 @@ const NAV_ITEMS = [
   { path: '/products', icon: Package, label: 'Products' },
   { path: '/salesmen', icon: Users, label: 'Salesmen' },
   { path: '/customers', icon: UserCircle, label: 'Customers' },
-  { path: '/inventory', icon: Warehouse, label: 'Inventory' },
 ];
 
 export function Sidebar() {

@@ -9,7 +9,7 @@ import { OverviewPage } from './pages/OverviewPage';
 import { ProductsPage } from './pages/ProductsPage';
 import { SalesmenPage } from './pages/SalesmenPage';
 import { CustomersPage } from './pages/CustomersPage';
-import { InventoryPage } from './pages/InventoryPage';
+// import { InventoryPage } from './pages/InventoryPage'; // Hidden until inventory data available
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -35,7 +35,7 @@ function DashboardLayout() {
           <Route path="/products" element={<ProductsPage />} />
           <Route path="/salesmen" element={<SalesmenPage />} />
           <Route path="/customers" element={<CustomersPage />} />
-          <Route path="/inventory" element={<InventoryPage />} />
+          {/* <Route path="/inventory" element={<InventoryPage />} /> — hidden until inventory data available */}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
