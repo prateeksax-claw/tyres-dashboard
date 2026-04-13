@@ -250,7 +250,7 @@ def tyres_summary(month: Optional[str] = None):
 
         # ── Brands ────────────────────────────────────────────────────
         rows_brands, _ = _query(f"""
-            SELECT COALESCE(Brand, 'Unknown') as brand,
+            SELECT COALESCE(Branch, 'Unknown') as brand,
                    ROUND(SUM(NetAmountWithoutVAT)) as revenue,
                    ROUND(SUM(CASE WHEN LastPurchaseRate > 0
                        THEN NetAmountWithoutVAT - (LastPurchaseRate * Quantity)
