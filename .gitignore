@@ -1,0 +1,22 @@
+# Secrets
+.env
+
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+
+# Build output
+frontend/dist/
+frontend/.vite/
+
+# Data files
+data/*.db
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/

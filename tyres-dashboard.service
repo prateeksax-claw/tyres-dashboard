@@ -1,0 +1,21 @@
+# Tyres Dashboard systemd service
+# Install: cp tyres-dashboard.service ~/.config/systemd/user/
+#          systemctl --user daemon-reload
+#          systemctl --user enable tyres-dashboard
+#          systemctl --user start tyres-dashboard
+
+[Unit]
+Description=AZ Tyres Dashboard
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/tyres-dashboard
+Environment=PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/home/ubuntu/tyres-dashboard/.env
+ExecStart=/usr/bin/python3 -m uvicorn backend.main:app --host 127.0.0.1 --port 8770
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
