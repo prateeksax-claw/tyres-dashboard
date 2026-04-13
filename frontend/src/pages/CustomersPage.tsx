@@ -40,6 +40,7 @@ export function CustomersPage() {
   const [searchInput, setSearchInput] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [expandedCustomer, setExpandedCustomer] = useState<string | null>(null);
+  const [sortBy, setSortBy] = useState<'revenue' | 'gp_pct' | 'invoices'>('revenue');
   const debounceRef = useRef<any>(null);
 
   useEffect(() => {
@@ -61,7 +62,8 @@ export function CustomersPage() {
     staleTime: 5 * 60 * 1000,
   });
 
-  const customers = data?.customers || [];
+  const rawCustomers = data?.customers || [];
+  const customers = [...rawCustomers].sort((a: any, b: any) => (b[sortBy] || 0) - (a[sortBy] || 0));
   const totalRev = customers.reduce((s: number, c: any) => s + (c.revenue || 0), 0);
   const totalInvoices = customers.reduce((s: number, c: any) => s + (c.invoices || 0), 0);
   const maxRev = Math.max(...customers.map((c: any) => c.revenue || 0), 1);
@@ -99,13 +101,21 @@ export function CustomersPage() {
       </div>
 
       <Card title="Customer List" subtitle="Click to expand details" actions={
-        <button onClick={() => exportCSV(`customers-${month}`, [
+        <div className="flex items-center gap-2">
+          <select value={sortBy} onChange={e => setSortBy(e.target.value as any)}
+            className="text-[10px] border border-gray-200 rounded-lg px-2 py-1 bg-white outline-none">
+            <option value="revenue">By Revenue</option>
+            <option value="gp_pct">By GP%</option>
+            <option value="invoices">By Invoices</option>
+          </select>
+          <button onClick={() => exportCSV(`customers-${month}`, [
           { label: 'Customer', key: 'customer' }, { label: 'Revenue', key: 'revenue' },
           { label: 'GP%', key: 'gp_pct' }, { label: 'Invoices', key: 'invoices' },
           { label: 'Salesman', key: 'salesman' },
         ], customers)} className="flex items-center gap-1 px-2 py-1 text-[10px] font-semibold text-gray-400 hover:text-teal-600 hover:bg-teal-50 rounded-md transition-all uppercase tracking-wider">
           <Download className="w-3 h-3" /> Export
-        </button>
+          </button>
+        </div>
       }>
         {/* Search */}
         <div className="relative mb-3">

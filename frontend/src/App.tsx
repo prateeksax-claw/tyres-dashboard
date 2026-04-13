@@ -4,6 +4,7 @@ import { FilterProvider } from './lib/filters';
 import { ThemeProvider } from './lib/theme';
 import { Sidebar } from './components/Sidebar';
 import { CommandPalette } from './components/CommandPalette';
+import { RefreshBar } from './components/RefreshBar';
 import { OverviewPage } from './pages/OverviewPage';
 import { ProductsPage } from './pages/ProductsPage';
 import { SalesmenPage } from './pages/SalesmenPage';
@@ -26,6 +27,9 @@ function DashboardLayout() {
       <Sidebar />
       <CommandPalette />
       <main className="ml-16 min-h-screen mesh-bg p-6">
+        <div className="max-w-[1600px] mx-auto flex justify-end mb-2 print:hidden">
+          <RefreshBar />
+        </div>
         <Routes>
           <Route path="/" element={<OverviewPage />} />
           <Route path="/products" element={<ProductsPage />} />
